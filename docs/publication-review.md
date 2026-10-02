@@ -20,5 +20,5 @@
 - pnpm check 通过：lint、103 项认证测试、3 项数据库迁移测试、Next.js 生产构建。
 - POSIX 0600 权限断言在 Linux CI 中保留；Windows 的文件权限由 ACL 表示，仅略过这一无对应语义的 mode 断言。
 - 构建保留来源实现中动态签名文件路径导致的 Next.js tracing 提示；独立追踪根目录与秘密文件排除已配置。
-- 本地 Docker daemon 未运行；Linux 测试与独立容器构建由仓库 CI 继续验收。
+- GitHub Actions 已通过 Linux 全量校验与独立 Docker 镜像构建；Linux 下包含签名文件 0600 权限断言。
 - 本次工作仅创建代码仓库，现有生产实例未切换。

@@ -21,7 +21,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 pnpm dev
 ```
 
-打开 http://localhost:4300。使用配置的邮箱注册并登录，可通过首个管理员流程进入管理后台。模板关闭演示账号、测试账号与本地 OAuth 客户端。代码中的演示密码和测试凭据仅用于显式启用的本地 fixture。
+打开 [http://localhost:4300](http://localhost:4300)。使用配置的邮箱注册并登录，可通过首个管理员流程进入管理后台。模板关闭演示账号、测试账号与本地 OAuth 客户端。代码中的演示密码和测试凭据仅用于显式启用的本地 fixture。
 
 ## 校验和运行
 
