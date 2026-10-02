@@ -1,0 +1,35 @@
+[
+  {
+    "id": "github",
+    "name": "GitHub",
+    "type": "github",
+    "enabled": false,
+    "clientId": "REPLACE_CLIENT_ID",
+    "clientSecret": "REPLACE_CLIENT_SECRET"
+  },
+  {
+    "id": "google",
+    "name": "Google",
+    "type": "google",
+    "enabled": false,
+    "clientId": "REPLACE_CLIENT_ID",
+    "clientSecret": "REPLACE_CLIENT_SECRET"
+  },
+  {
+    "id": "wechat",
+    "name": "微信",
+    "type": "wechat",
+    "enabled": false,
+    "clientId": "REPLACE_CLIENT_ID",
+    "clientSecret": "REPLACE_CLIENT_SECRET"
+  },
+  {
+    "id": "oidc",
+    "name": "企业账号",
+    "type": "oidc",
+    "enabled": false,
+    "clientId": "REPLACE_CLIENT_ID",
+    "clientSecret": "REPLACE_CLIENT_SECRET",
+    "issuer": "https://id.example.com"
+  }
+]

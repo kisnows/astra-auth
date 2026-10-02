@@ -1,0 +1,15 @@
+services:
+  auth:
+    image: ${AUTH_IMAGE:-astra-auth:local}
+    build: .
+    restart: unless-stopped
+    env_file:
+      - ${AUTH_ENV_FILE:-.env.production}
+    environment:
+      NODE_ENV: production
+      AUTH_SQLITE_PATH: /app/data/auth.sqlite
+      AUTH_DB_BACKUP_DIR: /app/data/backups
+    ports:
+      - "127.0.0.1:${AUTH_HOST_PORT:-33000}:3000"
+    volumes:
+      - ${AUTH_DATA_DIR:-./data}:/app/data
