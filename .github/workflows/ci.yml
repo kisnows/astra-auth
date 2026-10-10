@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: pnpm/action-setup@v4
         with:
           version: 9.12.0
@@ -22,5 +24,23 @@ jobs:
       - run: pnpm check
         env:
           NEXT_TELEMETRY_DISABLED: '1'
-      - name: Build standalone container
-        run: docker build -t astra-auth:ci .
+      - name: Build standalone container and delivery artifact
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision=$(git rev-parse HEAD)
+          image="astra-auth:$revision"
+          mkdir -p output/image
+          docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$revision" -t "$image" .
+          docker save "$image" | gzip > "output/image/astra-auth-$revision.tar.gz"
+          printf '%s\n' "$revision" > output/image/revision.txt
+          docker image inspect "$image" --format '{{json .}}' | jq '{imageId:.Id, revision:.Config.Labels["org.opencontainers.image.revision"], os:.Os, architecture:.Architecture}' > output/image/image-metadata.json
+          (cd output/image && sha256sum *.tar.gz revision.txt image-metadata.json > SHA256SUMS)
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-auth-image-${{ steps.image.outputs.revision }}
+          path: output/image/
+          retention-days: 7
+          if-no-files-found: error

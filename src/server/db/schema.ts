@@ -155,6 +155,7 @@ export const oauthAccessTokens = sqliteTable(
   {
     id: text("id").primaryKey().$defaultFn(() => randomUUID()),
     token: text("token").notNull(),
+    grantId: text("grantId"),
     clientId: text("clientId").notNull(),
     userId: text("userId").notNull(),
     scope: text("scope").notNull(),
@@ -167,6 +168,22 @@ export const oauthAccessTokens = sqliteTable(
     userIdx: index("OAuthAccessToken_userId_idx").on(table.userId),
   }),
 );
+
+export const oauthRefreshGrants = sqliteTable("OAuthRefreshGrant", {
+  id: text("id").primaryKey(),
+  clientId: text("clientId").notNull(),
+  userId: text("userId").notNull(),
+  scope: text("scope").notNull(),
+  clientSecretHash: text("clientSecretHash").notNull(),
+  expiresAt: dateTimeText("expiresAt").notNull(),
+  revokedAt: dateTimeText("revokedAt"),
+});
+
+export const oauthRefreshTokens = sqliteTable("OAuthRefreshToken", {
+  tokenHash: text("tokenHash").primaryKey(),
+  grantId: text("grantId").notNull(),
+  usedAt: dateTimeText("usedAt"),
+}, (table) => ({ grantIdx: index("OAuthRefreshToken_grantId_idx").on(table.grantId) }));
 
 export const adminAuditLogs = sqliteTable(
   "AdminAuditLog",

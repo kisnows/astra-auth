@@ -12,7 +12,9 @@ export async function GET() {
     jwks_uri: config.jwksUri,
     scopes_supported: resolveDefaultScopes().split(" "),
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    revocation_endpoint: `${config.issuer}/oauth2/revoke`,
+    revocation_endpoint_auth_methods_supported: ["client_secret_post"],
     token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
     code_challenge_methods_supported: ["S256"],
   });

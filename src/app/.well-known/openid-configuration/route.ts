@@ -17,7 +17,9 @@ export async function GET() {
     scopes_supported: resolveDefaultScopes().split(" "),
     token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
     claims_supported: ["sub", "email", "email_verified", "name", "nonce", "role"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    revocation_endpoint: `${config.issuer}/oauth2/revoke`,
+    revocation_endpoint_auth_methods_supported: ["client_secret_post"],
     code_challenge_methods_supported: ["S256"],
   });
 }

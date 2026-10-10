@@ -135,6 +135,7 @@ function ensureAuthSchema(sqlite: Database.Database) {
     CREATE TABLE IF NOT EXISTS OAuthAccessToken (
       id TEXT PRIMARY KEY,
       token TEXT NOT NULL,
+      grantId TEXT,
       clientId TEXT NOT NULL,
       userId TEXT NOT NULL,
       scope TEXT NOT NULL,
@@ -144,6 +145,15 @@ function ensureAuthSchema(sqlite: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS OAuthAccessToken_token_key ON OAuthAccessToken (token);
     CREATE INDEX IF NOT EXISTS OAuthAccessToken_clientId_idx ON OAuthAccessToken (clientId);
     CREATE INDEX IF NOT EXISTS OAuthAccessToken_userId_idx ON OAuthAccessToken (userId);
+
+    CREATE TABLE IF NOT EXISTS OAuthRefreshGrant (
+      id TEXT PRIMARY KEY, clientId TEXT NOT NULL, userId TEXT NOT NULL,
+      scope TEXT NOT NULL, clientSecretHash TEXT NOT NULL, expiresAt TEXT NOT NULL, revokedAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS OAuthRefreshToken (
+      tokenHash TEXT PRIMARY KEY, grantId TEXT NOT NULL, usedAt TEXT
+    );
+    CREATE INDEX IF NOT EXISTS OAuthRefreshToken_grantId_idx ON OAuthRefreshToken (grantId);
 
     CREATE TABLE IF NOT EXISTS AdminAuditLog (
       id TEXT PRIMARY KEY,
@@ -194,10 +204,12 @@ function getOrCreateDb() {
   ensureAuthSchema(sqlite);
   // 中文注释：已有库的扩展必须经过带备份的 bootstrap 迁移，不在请求中静默 ALTER。
   const clientColumns = sqlite.prepare("PRAGMA table_info(OAuthClient)").all() as { name: string }[];
+  const accessColumns = sqlite.prepare("PRAGMA table_info(OAuthAccessToken)").all() as { name: string }[];
   const codeColumns = sqlite.prepare("PRAGMA table_info(OAuthAuthorizationCode)").all() as { name: string }[];
   if (!clientColumns.some((column) => column.name === "loginDescription") ||
       !clientColumns.some((column) => column.name === "allowedUserIds") ||
-      !codeColumns.some((column) => column.name === "nonce")) {
+      !codeColumns.some((column) => column.name === "nonce") ||
+      !accessColumns.some((column) => column.name === "grantId")) {
     sqlite.close();
     throw new Error("Auth 数据库需要先执行 scripts/bootstrap-auth.mjs 完成兼容迁移");
   }

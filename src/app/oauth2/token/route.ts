@@ -3,6 +3,7 @@ import { getOidcConfig } from "@/server/oidc/config";
 import { signIdToken } from "@/server/oidc/keys";
 import {
   exchangeAuthorizationCode,
+  exchangeRefreshToken,
   verifyOAuthClientSecret,
 } from "@/server/oidc/service";
 
@@ -26,7 +27,7 @@ function parseBasicAuthorization(authHeader: string | null) {
 }
 
 /**
- * 中文注释：Token 端点仅支持授权码换取 token，并完成 client 鉴权与 code 校验。
+ * 中文注释：Token 端点支持授权码与机密客户端轮换续期，并完成 client 鉴权与 code 校验。
  */
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") || "";
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
   const redirectUri = String(body.get("redirect_uri") || "");
   const codeVerifier = body.get("code_verifier")?.toString() || null;
 
-  if (grantType !== "authorization_code") {
+  if (grantType !== "authorization_code" && grantType !== "refresh_token") {
     return NextResponse.json({ error: "unsupported_grant_type" }, { status: 400 });
   }
 
@@ -61,6 +62,16 @@ export async function POST(request: Request) {
   const client = await verifyOAuthClientSecret(clientId, clientSecret);
   if (!client) {
     return unauthorized();
+  }
+
+  if (grantType === "refresh_token") {
+    const exchanged = exchangeRefreshToken({ clientId, refreshToken: String(body.get("refresh_token") || ""),
+      ...(body.has("scope") ? { scope: String(body.get("scope")) } : {}) });
+    if (!exchanged) return NextResponse.json({ error: "invalid_grant" }, { status: 400, headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ access_token: exchanged.accessToken, refresh_token: exchanged.refreshToken,
+      token_type: "Bearer", expires_in: Math.max(0, Math.floor((exchanged.expiresAt.getTime() - Date.now()) / 1000)),
+      refresh_token_expires_in: Math.max(0, Math.floor((exchanged.refreshExpiresAt.getTime() - Date.now()) / 1000)), scope: exchanged.scope,
+    }, { headers: { "Cache-Control": "no-store", Pragma: "no-cache" } });
   }
 
   const exchanged = await exchangeAuthorizationCode({
@@ -88,6 +99,8 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     access_token: exchanged.accessToken,
+    refresh_token: exchanged.refreshToken,
+    refresh_token_expires_in: Math.max(0, Math.floor((exchanged.refreshExpiresAt.getTime() - Date.now()) / 1000)),
     token_type: "Bearer",
     expires_in: 3600,
     scope: exchanged.record.scope,
