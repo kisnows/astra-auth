@@ -61,6 +61,10 @@ test("旧 Auth SQLite 原地升级时保留数据、生成一次备份并登记�
     const nonceColumns = migratedDb.prepare("PRAGMA table_info(OAuthAuthorizationCode)").all().map((row) => row.name);
     const clientColumns = migratedDb.prepare("PRAGMA table_info(OAuthClient)").all().map((row) => row.name);
     assert.ok(nonceColumns.includes("nonce"));
+    assert.ok(migratedDb.prepare("PRAGMA table_info(OAuthAccessToken)").all().some(row => row.name === "grantId"));
+    assert.ok(migratedDb.prepare("SELECT id FROM __astra_auth_migrations WHERE id = ?").get("0004-oidc-refresh-grants"));
+    assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE name='OAuthRefreshGrant'").get());
+    assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE name='OAuthRefreshToken'").get());
     assert.ok(clientColumns.includes("allowedUserIds"));
     assert.ok(migratedDb.prepare("SELECT id FROM __astra_auth_migrations WHERE id = ?").get("0002-oidc-client-access-nonce"));
     const integrity = migratedDb.prepare("PRAGMA integrity_check").get();
@@ -137,5 +141,29 @@ test("v2 客户端介绍兼容迁移保留凭据授权并支持旧版读取，�
     const repeated = new DatabaseSync(dbPath, { readOnly: true });
     assert.equal(repeated.prepare("SELECT loginDescription FROM OAuthClient").get().loginDescription, "保持自定义介绍");
     assert.equal(repeated.prepare("PRAGMA integrity_check").get().integrity_check, "ok"); repeated.close();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test("续期迁移从 v3 兼容升级，保留旧 access token、原身份与回滚可读结构", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "astra-refresh-migration-"));
+  const dbPath = path.join(dir, "auth.sqlite"), backupDir = path.join(dir, "backups");
+  try {
+    assert.equal(runBootstrap(dbPath, backupDir).status, 0);
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec("DROP TABLE OAuthRefreshToken; DROP TABLE OAuthRefreshGrant; ALTER TABLE OAuthAccessToken DROP COLUMN grantId; DELETE FROM __astra_auth_migrations WHERE id='0004-oidc-refresh-grants';");
+    legacy.exec("INSERT INTO OAuthAccessToken(id,token,clientId,userId,scope,expiresAt) VALUES('old-access','fixture-token','old-client','old-user','openid','2030-01-01');");
+    const before = legacy.prepare("SELECT * FROM OAuthAccessToken").all(); legacy.close();
+    const migrated = runBootstrap(dbPath, backupDir); assert.equal(migrated.status, 0, migrated.stderr);
+    const current = new DatabaseSync(dbPath, { readOnly: true });
+    const row = current.prepare("SELECT * FROM OAuthAccessToken").get();
+    const { grantId, ...legacyFields } = row;
+    assert.equal(grantId, null); current.close(); assert.deepEqual({ ...legacyFields }, { ...before[0] });
+    const ledger = new DatabaseSync(dbPath, { readOnly: true });
+    assert(ledger.prepare("SELECT id FROM __astra_auth_migrations WHERE id='0004-oidc-refresh-grants'").get()); ledger.close();
+    const backups = fs.readdirSync(backupDir); assert.equal(backups.length, 1);
+    const backup = new DatabaseSync(path.join(backupDir, backups[0]), { readOnly: true });
+    assert.deepEqual(backup.prepare("SELECT * FROM OAuthAccessToken").all(), before); backup.close();
+    assert.equal(runBootstrap(dbPath, backupDir).status, 0); assert.equal(fs.readdirSync(backupDir).length, 1);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

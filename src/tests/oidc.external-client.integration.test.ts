@@ -85,7 +85,7 @@ describe("外部系统 OIDC 接入", () => {
     for (const value of [undefined, [raw(),raw()], "//evil.test" + raw(), "https://evil.test" + raw(), "/account", raw() + "#fragment", raw() + "&client_id=other", raw() + "&scope=openid", "/\\evil.test", raw().replace("response_type=code", "response_type=token")]) {
       expect(await resolveLoginApplication(value)).toBeNull();
     }
-    for (const override of [{ client_id: "unknown" }, { redirect_uri: "https://evil.test/callback" }, { scope: "admin" }, { code_challenge_method: "plain" }]) {
+    for (const override of ([{ client_id: "unknown" }, { redirect_uri: "https://evil.test/callback" }, { scope: "admin" }, { code_challenge_method: "plain" }] as Record<string, string>[])) {
       const url = new URL(authorizationUrl(override).url); expect(await resolveLoginApplication(url.pathname + url.search)).toBeNull();
     }
     const makeRequest = (description: unknown) => new Request(`${issuer}/api/admin/clients`, { method: "PATCH", headers: { "content-type": "application/json", origin: issuer }, body: JSON.stringify({ clientId, appName: "Media Vault", loginDescription: description, redirectUris: redirectUri, scopes: "openid profile email", trusted: true, status: "active", allowedUserIds: ["owner"] }) });
@@ -170,6 +170,81 @@ describe("外部系统 OIDC 接入", () => {
     db.update(users).set({ isDisabled: true }).where(eq(users.id, "owner")).run();
     expect(await service.findAccessToken(access!.accessToken)).toBeNull();
     db.update(users).set({ isDisabled: false }).where(eq(users.id, "owner")).run();
+  });
+
+  it("轮换续期保留绝对期限、scope 和客户端绑定，重放撤销整个授权链", async () => {
+    const response = await token.POST(tokenRequest(await service.issueAuthorizationCode({ clientId, userId: "owner",
+      redirectUri, scope: "openid profile email", codeChallenge: challenge })));
+    const initial = await response.json();
+    expect(initial.refresh_token).toBeTruthy();
+    const refresh = (value: string, scope?: string, id = clientId) => new Request(issuer + "/oauth2/token", { method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({
+        grant_type: "refresh_token", client_id: id, client_secret: clientSecret, refresh_token: value,
+        ...(scope == null ? {} : { scope }) }) });
+    expect((await token.POST(refresh(initial.refresh_token, "admin"))).status).toBe(400);
+    expect(service.exchangeRefreshToken({ refreshToken: initial.refresh_token, clientId: "other-client" })).toBeNull();
+    const next = await (await token.POST(refresh(initial.refresh_token, "openid"))).json();
+    expect(next.refresh_token).toBeTruthy(); expect(next.refresh_token).not.toBe(initial.refresh_token);
+    expect(next.scope).toBe("openid"); expect(next.refresh_token_expires_in).toBeLessThanOrEqual(initial.refresh_token_expires_in);
+    expect((await token.POST(refresh(next.refresh_token, "openid profile"))).status).toBe(400);
+    const results = await Promise.all([token.POST(refresh(next.refresh_token)), token.POST(refresh(next.refresh_token))]);
+    expect(results.map((item) => item.status).sort()).toEqual([200, 400]);
+    const issued = await results.find((item) => item.status === 200)!.json();
+    expect(await service.findAccessToken(issued.access_token)).toBeNull();
+    expect((await token.POST(refresh(issued.refresh_token))).status).toBe(400);
+    const { default: db } = await import("@/server/db");
+    const { oauthRefreshTokens } = await import("@/server/db/schema");
+    expect(JSON.stringify(db.select().from(oauthRefreshTokens).all())).not.toContain(initial.refresh_token);
+  });
+
+  it("续期拒绝过期、撤权、禁用用户、强制改密、已撤销及密钥轮换的授权", async () => {
+    const issue = async () => service.exchangeAuthorizationCode({ clientId, redirectUri, codeVerifier: verifier,
+      code: await service.issueAuthorizationCode({ clientId, userId: "owner", redirectUri, scope: "openid", codeChallenge: challenge }) });
+    const { default: db } = await import("@/server/db");
+    const { users, oauthRefreshGrants } = await import("@/server/db/schema");
+    for (const field of ["isDisabled", "mustChangePassword"] as const) {
+      const issued = (await issue())!;
+      db.update(users).set({ [field]: true }).where(eq(users.id, "owner")).run();
+      expect(service.exchangeRefreshToken({ clientId, refreshToken: issued.refreshToken })).toBeNull();
+      db.update(users).set({ [field]: false }).where(eq(users.id, "owner")).run();
+      expect(service.exchangeRefreshToken({ clientId, refreshToken: issued.refreshToken })).toBeNull();
+    }
+    const expired = (await issue())!;
+    db.update(oauthRefreshGrants).set({ expiresAt: new Date(1) }).run();
+    expect(service.exchangeRefreshToken({ clientId, refreshToken: expired.refreshToken })).toBeNull();
+    const revoked = (await issue())!;
+    service.revokeOAuthToken(revoked.refreshToken, "other-client");
+    expect(await service.findAccessToken(revoked.accessToken)).not.toBeNull();
+    service.revokeOAuthToken(revoked.accessToken, clientId);
+    expect(service.exchangeRefreshToken({ clientId, refreshToken: revoked.refreshToken })).toBeNull();
+    const denied = (await issue())!;
+    service.updateOAuthClient({ actorUserId: "owner", clientId, appName: "Stock", redirectUris: [redirectUri],
+      scopes: "openid profile email", trusted: true, status: "active", allowedUserIds: [] });
+    expect(service.exchangeRefreshToken({ clientId, refreshToken: denied.refreshToken })).toBeNull();
+    service.updateOAuthClient({ actorUserId: "owner", clientId, appName: "Stock", redirectUris: [redirectUri],
+      scopes: "openid profile email", trusted: true, status: "active", allowedUserIds: ["owner"] });
+    const rotated = (await issue())!;
+    clientSecret = (await service.rotateOAuthClientSecret({ actorUserId: "owner", clientId }))!.clientSecret;
+    expect(service.exchangeRefreshToken({ clientId, refreshToken: rotated.refreshToken })).toBeNull();
+    expect(await service.findAccessToken(rotated.accessToken)).toBeNull();
+  });
+
+  it("两个发现端点一致声明续期，撤销端点验证原客户端", async () => {
+    for (const module of [await import("@/app/.well-known/openid-configuration/route"), await import("@/app/.well-known/oauth-authorization-server/route")]) {
+      const metadata = await (await module.GET()).json();
+      expect(metadata.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
+      expect(metadata.revocation_endpoint).toBe(issuer + "/oauth2/revoke");
+    }
+    const revoke = await import("@/app/oauth2/revoke/route");
+    const issued = (await service.exchangeAuthorizationCode({ clientId, redirectUri,
+      code: await service.issueAuthorizationCode({ clientId, userId: "owner", redirectUri, scope: "openid" }) }))!;
+    const request = (secret: string) => new Request(issuer + "/oauth2/revoke", { method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: issued.refreshToken, client_id: clientId, client_secret: secret }) });
+    expect((await revoke.POST(request("wrong"))).status).toBe(401);
+    expect(await service.findAccessToken(issued.accessToken)).not.toBeNull();
+    expect((await revoke.POST(request(clientSecret))).status).toBe(200);
+    expect(await service.findAccessToken(issued.accessToken)).toBeNull();
   });
 
   it("管理接口隐藏 secret 摘要，创建默认拒绝访问，拦截非法回调和跨站写入", async () => {

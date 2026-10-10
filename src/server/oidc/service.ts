@@ -5,6 +5,8 @@ import {
   adminAuditLogs,
   adminRoles,
   oauthAccessTokens,
+  oauthRefreshGrants,
+  oauthRefreshTokens,
   oauthAuthorizationCodes,
   oauthClients,
   users,
@@ -237,7 +239,7 @@ export async function exchangeAuthorizationCode(input: {
     )).get();
     if (!record || !verifyPkce(record.codeChallenge, input.codeVerifier)) return null;
     const client = tx.select().from(oauthClients).where(eq(oauthClients.clientId, record.clientId)).get();
-    if (!client || !clientAllowsUser(client, record.userId)) return null;
+    if (!client || !clientAllowsUser(client, record.userId) || !clientSupportsScopes(client, record.scope)) return null;
     const user = tx.select({
       id: users.id, email: users.email, name: users.name, emailVerified: users.emailVerified,
       isDisabled: users.isDisabled, mustChangePassword: users.mustChangePassword, role: adminRoles.role,
@@ -249,13 +251,63 @@ export async function exchangeAuthorizationCode(input: {
       .returning().get();
     if (!consumed) return null;
     const accessToken = randomBytes(32).toString("base64url");
+    const refreshToken = randomBytes(32).toString("base64url");
+    const grantId = randomBytes(32).toString("base64url");
+    const refreshExpiresAt = nowPlusSeconds(30 * 86400);
+    tx.insert(oauthRefreshGrants).values({ id: grantId, clientId: record.clientId, userId: record.userId,
+      scope: record.scope, clientSecretHash: client.clientSecret, expiresAt: refreshExpiresAt }).run();
+    tx.insert(oauthRefreshTokens).values({ tokenHash: hashClientSecret(refreshToken), grantId }).run();
     const expiresAt = nowPlusSeconds(3600);
     tx.insert(oauthAccessTokens).values({
-      token: accessToken, clientId: record.clientId, userId: record.userId,
+      token: accessToken, grantId, clientId: record.clientId, userId: record.userId,
       scope: record.scope, expiresAt,
     }).run();
-    return { record, accessToken, accessTokenExpiresAt: expiresAt,
+    return { record, accessToken, refreshToken, refreshExpiresAt, accessTokenExpiresAt: expiresAt,
       user: { ...user, role: user.role === "admin" ? "admin" as const : "user" as const } };
+  }, { behavior: "immediate" });
+}
+
+/** 中文注释：BEGIN IMMEDIATE 串行化整条续期链；已消费令牌重放会永久撤销该链。 */
+export function exchangeRefreshToken(input: { refreshToken: string; clientId: string; scope?: string }) {
+  return db.transaction((tx) => {
+    const record = tx.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.tokenHash, hashClientSecret(input.refreshToken))).get();
+    if (!record) return null;
+    const grant = tx.select().from(oauthRefreshGrants).where(eq(oauthRefreshGrants.id, record.grantId)).get();
+    if (!grant || !grant.expiresAt || grant.clientId !== input.clientId) return null;
+    const scope = input.scope ?? grant.scope;
+    const requested = scope.trim().split(/\s+/).filter(Boolean);
+    if (!requested.length || requested.some((value) => !grant.scope.split(/\s+/).includes(value))) return null;
+    const revoke = () => { tx.update(oauthRefreshGrants).set({ revokedAt: new Date() }).where(eq(oauthRefreshGrants.id, grant.id)).run(); return null; };
+    if (grant.revokedAt || grant.expiresAt <= new Date() || record.usedAt) return revoke();
+    const client = tx.select().from(oauthClients).where(eq(oauthClients.clientId, grant.clientId)).get();
+    const user = tx.select({ id: users.id, isDisabled: users.isDisabled, mustChangePassword: users.mustChangePassword })
+      .from(users).where(eq(users.id, grant.userId)).get();
+    if (!client || !clientAllowsUser(client, grant.userId) || client.clientSecret !== grant.clientSecretHash
+      || !clientSupportsScopes(client, grant.scope) || !user || user.isDisabled || user.mustChangePassword) return revoke();
+    const consumed = tx.update(oauthRefreshTokens).set({ usedAt: new Date() })
+      .where(and(eq(oauthRefreshTokens.tokenHash, record.tokenHash), isNull(oauthRefreshTokens.usedAt))).returning().get();
+    if (!consumed) return revoke();
+    const accessToken = randomBytes(32).toString("base64url");
+    const refreshToken = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(Math.min(Date.now() + 3600000, grant.expiresAt.getTime()));
+    tx.insert(oauthAccessTokens).values({ token: accessToken, grantId: grant.id, clientId: grant.clientId,
+      userId: grant.userId, scope: requested.join(" "), expiresAt }).run();
+    tx.insert(oauthRefreshTokens).values({ tokenHash: hashClientSecret(refreshToken), grantId: grant.id }).run();
+    // 中文注释：缩小 scope 后不可在后续续期重新扩大；绝对到期时间保持不变。
+    tx.update(oauthRefreshGrants).set({ scope: requested.join(" ") }).where(eq(oauthRefreshGrants.id, grant.id)).run();
+    return { accessToken, refreshToken, scope: requested.join(" "), expiresAt, refreshExpiresAt: grant.expiresAt };
+  }, { behavior: "immediate" });
+}
+
+/** 中文注释：只允许已鉴权的原客户端撤销令牌族，未知令牌统一返回成功。 */
+export function revokeOAuthToken(token: string, clientId: string) {
+  db.transaction((tx) => {
+    const refresh = tx.select().from(oauthRefreshTokens).where(eq(oauthRefreshTokens.tokenHash, hashClientSecret(token))).get();
+    const access = tx.select().from(oauthAccessTokens).where(eq(oauthAccessTokens.token, token)).get();
+    const grantId = refresh?.grantId ?? access?.grantId;
+    if (grantId) tx.update(oauthRefreshGrants).set({ revokedAt: new Date() })
+      .where(and(eq(oauthRefreshGrants.id, grantId), eq(oauthRefreshGrants.clientId, clientId))).run();
+    else if (access?.clientId === clientId) tx.delete(oauthAccessTokens).where(eq(oauthAccessTokens.id, access.id)).run();
   }, { behavior: "immediate" });
 }
 
@@ -263,6 +315,8 @@ export async function findAccessToken(token: string) {
   const [item] = await db
     .select({
       token: oauthAccessTokens.token,
+      grantId: oauthAccessTokens.grantId,
+      mustChangePassword: users.mustChangePassword,
       clientId: oauthAccessTokens.clientId,
       scope: oauthAccessTokens.scope,
       userId: oauthAccessTokens.userId,
@@ -276,9 +330,14 @@ export async function findAccessToken(token: string) {
     .where(and(eq(oauthAccessTokens.token, token), gt(oauthAccessTokens.expiresAt, new Date())))
     .limit(1);
 
-  if (!item) return null;
+  if (!item || item.mustChangePassword) return null;
+  if (item.grantId) {
+    const grant = db.select().from(oauthRefreshGrants).where(eq(oauthRefreshGrants.id, item.grantId)).get();
+    const current = db.select().from(oauthClients).where(eq(oauthClients.clientId, item.clientId)).get();
+    if (!grant || !grant.expiresAt || grant.revokedAt || grant.expiresAt <= new Date() || grant.clientSecretHash !== current?.clientSecret) return null;
+  }
   const client = await getOAuthClientByClientId(item.clientId);
-  if (!client || !clientAllowsUser(client, item.userId)) return null;
+  if (!client || !clientAllowsUser(client, item.userId) || !clientSupportsScopes(client, item.scope)) return null;
   const role = await resolveAuthRole(item.userId);
   if (!role) return null;
   return { ...item, role };
